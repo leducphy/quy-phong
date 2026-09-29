@@ -11,7 +11,6 @@ const event = (from, action, text) => ({ from, chat: { id: from.id, type: 'priva
 function database() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
-  sqlite.exec(readFileSync(new URL('./migrations/0001_button_workflow.sql', import.meta.url), 'utf8'));
   const db = {
     prepare(query) {
       const prepared = sqlite.prepare(query);
@@ -96,7 +95,7 @@ test('every new transaction waits for the other person; An completes reimburseme
   balance = (await handle(db, env, event(phi, 'balance'), 14)).reply;
   assert.match(balance, /Quỹ còn: 980.000đ/);
   assert.match(balance, /Cần hoàn ứng: 0đ/);
-  assert.equal(sqlite.prepare('SELECT COUNT(*) count FROM reimbursement_requests').get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name='reimbursement_requests'").get().count, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM audit WHERE action='reimburse'").get().count, 1);
 });
 
@@ -165,18 +164,14 @@ test('menu totals come from confirmed transactions and history uses creation tim
   assert.deepEqual(history.markup.inline_keyboard.slice(0, 4).map(row => row[0].callback_data), ['tx:4', 'tx:2', 'tx:3', 'tx:1']);
 });
 
-test('old reimbursement requests are closed when An reimburses and due order follows creation time', async () => {
+test('due order follows creation time', async () => {
   const { db, sqlite } = database();
   await startBoth(db);
   sqlite.exec("INSERT INTO transactions(occurred_on,kind,amount_vnd,description,paid_by,status,created_at) VALUES ('2026-09-29','expense',6000,'Mới theo ID','Phi','confirmed','2026-09-01 00:00:00'),('2026-09-01','expense',20000,'Mới theo ngày thêm','Phi','confirmed','2026-09-03 00:00:00')");
-  sqlite.exec("INSERT INTO reimbursement_requests(transaction_id,amount_vnd,status,sent_by) VALUES(1,6000,'sent',202)");
   const due = await handle(db, env, event(an, 'due'), 3);
   assert.deepEqual(due.markup.inline_keyboard.slice(0, 2).map(row => row[0].callback_data), ['tx:2', 'tx:1']);
-  await handle(db, env, event(an, 'send:1'), 4);
-  assert.equal(sqlite.prepare('SELECT status FROM reimbursement_requests WHERE id=1').get().status, 'cancelled');
+  await handle(db, env, event(an, 'reimburse:1'), 4);
   assert.equal(sqlite.prepare('SELECT reimbursed_vnd FROM transactions WHERE id=1').get().reimbursed_vnd, 6000);
-  const oldButton = await handle(db, env, event(phi, 'receive:1'), 5);
-  assert.match(oldButton.reply, /Luồng hoàn ứng đã thay đổi/);
 });
 
 test('webhook sends action buttons to the other member after a new entry', async () => {

@@ -1,4 +1,3 @@
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
   telegram_id INTEGER PRIMARY KEY,
   member TEXT NOT NULL UNIQUE CHECK(member IN ('Phi','An')),
@@ -38,4 +37,27 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE TABLE IF NOT EXISTS processed_updates (
   update_id INTEGER PRIMARY KEY,
   processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS change_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+  action TEXT NOT NULL CHECK(action IN ('edit','delete')),
+  field TEXT,
+  proposed_value TEXT,
+  requested_by INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  reviewed_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_change_per_transaction
+  ON change_requests(transaction_id) WHERE status='pending';
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient_member TEXT NOT NULL CHECK(recipient_member IN ('Phi','An')),
+  event TEXT NOT NULL,
+  reference_id INTEGER NOT NULL,
+  sent_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

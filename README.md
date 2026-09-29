@@ -5,12 +5,15 @@ Bot Telegram quản lý quỹ phòng của Phi và An, chạy trên Cloudflare W
 ## Các tệp chính
 
 - `cloudflare/worker.js`: giao diện nút bấm và webhook.
-- `cloudflare/schema.sql`: cấu trúc D1 ban đầu.
-- `cloudflare/migrations/0001_button_workflow.sql`: bảng duyệt sửa và lịch sử hoàn ứng; đã áp dụng trên D1 đang chạy.
+- `cloudflare/schema.sql`: cấu trúc D1 hiện tại, gồm các bảng giao dịch, duyệt thay đổi và thông báo.
 - `cloudflare/wrangler.toml`: tên Worker và liên kết D1 của bản đang chạy.
 - `cloudflare/worker.test.js`: kiểm tra quyền, trạng thái quỹ và thông báo.
 
 Giao dịch ở Cloudflare D1. `.env`, bản sao dữ liệu và thông tin đăng nhập Wrangler nằm trong repo trên Desktop nhưng **bị Git bỏ qua**; chúng không được đẩy lên GitHub. Cập nhật mã không nhập lại dữ liệu cũ.
+
+## Dữ liệu Excel ban đầu
+
+D1 được tạo lại từ 86 giao dịch trong file `Quỹ Phòng.xlsx`: 14 khoản thu và 72 khoản chi. Tổng thu 23.816.000đ, tổng chi 23.367.000đ, quỹ ban đầu 449.000đ. Một khoản chi 30.000đ ở dòng 36 của sheet `Chi tiêu` không có ngày nên được giữ nguyên là chưa rõ ngày. Ghi chú trong Excel được giữ lại; các khoản đã ghi "đã ck" không trở thành khoản đang chờ hoàn. Dữ liệu thử phát sinh trước lần tạo lại không được nhập lại.
 
 ## Dùng nút bấm
 
