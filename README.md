@@ -6,7 +6,7 @@ Bot Telegram quản lý quỹ phòng của Phi và An, chạy trên Cloudflare W
 
 - `cloudflare/worker.js`: giao diện nút bấm và webhook.
 - `cloudflare/schema.sql`: cấu trúc D1 ban đầu.
-- `cloudflare/migrations/0001_button_workflow.sql`: bảng duyệt sửa và hoàn ứng hai bước; đã áp dụng trên D1 đang chạy.
+- `cloudflare/migrations/0001_button_workflow.sql`: bảng duyệt sửa và lịch sử hoàn ứng; đã áp dụng trên D1 đang chạy.
 - `cloudflare/wrangler.toml`: tên Worker và liên kết D1 của bản đang chạy.
 - `cloudflare/worker.test.js`: kiểm tra quyền, trạng thái quỹ và thông báo.
 
@@ -16,7 +16,9 @@ Giao dịch ở Cloudflare D1. `.env`, bản sao dữ liệu và thông tin đă
 
 Mỗi người mở chat riêng với bot và bấm **Start** một lần. Sau đó bấm **☰ Menu** để ghi góp quỹ, chi từ quỹ, ứng tiền cá nhân, xem số dư hoặc các việc đang chờ. Khi bot hỏi số tiền và nội dung, trả lời trực tiếp tin nhắn đó. Bot không dùng lệnh gõ tay cho thao tác thường ngày và không xử lý giao dịch trong nhóm.
 
-Người còn lại duyệt hoặc từ chối mọi giao dịch mới. Trước khi duyệt, số dư quỹ chưa thay đổi. Sau khi duyệt khoản ứng, quỹ trừ tiền và hiện khoản cần hoàn. An bấm **Đã chuyển tiền hoàn**; Phi bấm **Đã nhận** để hoàn tất. Bước hoàn tiền không trừ quỹ lần thứ hai. Giao dịch đã duyệt nếu cần sửa hoặc hủy cũng phải được người còn lại chấp thuận.
+Người còn lại duyệt hoặc từ chối mọi giao dịch mới. Trước khi duyệt, số dư quỹ chưa thay đổi. Sau khi duyệt khoản ứng, quỹ trừ tiền và hiện khoản cần hoàn. An có thể bấm **Hoàn khoản này** hoặc **Hoàn toàn bộ** rồi xác nhận tổng tiền; khoản ứng được ghi nhận hoàn ngay, Phi không cần bấm xác nhận. Bước hoàn tiền không trừ quỹ lần thứ hai. Giao dịch đã duyệt nếu cần sửa hoặc hủy cũng phải được người còn lại chấp thuận.
+
+Menu hiển thị số dư, tiền mỗi người đã góp, tổng chi và tổng cần hoàn theo dữ liệu D1 hiện tại. Danh sách giao dịch, khoản chờ duyệt, khoản cần hoàn và bản CSV xếp theo ngày thêm mới nhất trước; nếu cùng thời điểm thì dùng ID mới nhất trước.
 
 ## Hai tài khoản được dùng bot
 

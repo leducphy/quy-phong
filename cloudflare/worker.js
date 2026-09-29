@@ -88,7 +88,7 @@ async function transaction(db, txId) {
 function transactionButtons(row, member, userId) {
   const rows = [];
   if (row.status === 'pending' && row.created_by !== userId) rows.push([button('✅ Duyệt', 'approve:' + row.id), button('❌ Từ chối', 'reject:' + row.id)]);
-  if (row.status === 'confirmed' && row.paid_by && Number(row.reimbursed_vnd) < Number(row.amount_vnd) && member === HOLDER) rows.push([button('↩️ Đã chuyển tiền hoàn', 'send:' + row.id)]);
+  if (row.status === 'confirmed' && row.paid_by && Number(row.reimbursed_vnd) < Number(row.amount_vnd) && member === HOLDER) rows.push([button('↩️ Hoàn khoản này', 'reimburse:' + row.id)]);
   rows.push([button('✏️ Sửa', 'edit:' + row.id), button('🗑 Hủy', 'delete:' + row.id)]);
   rows.push([button('🕘 Nhật ký', 'audit:' + row.id), button('‹ Menu', 'm')]);
   return keyboard(rows);
@@ -97,6 +97,9 @@ async function summary(db) {
   const totals = await first(db, "SELECT COALESCE(SUM(CASE WHEN kind='contribution' THEN amount_vnd ELSE 0 END),0) income,COALESCE(SUM(CASE WHEN kind='expense' THEN amount_vnd ELSE 0 END),0) expense,COALESCE(SUM(CASE WHEN kind='expense' AND paid_by IS NOT NULL THEN amount_vnd-reimbursed_vnd ELSE 0 END),0) due FROM transactions WHERE status='confirmed' AND deleted_at IS NULL");
   const members = await all(db, "SELECT member,SUM(amount_vnd) total FROM transactions WHERE kind='contribution' AND status='confirmed' AND deleted_at IS NULL GROUP BY member");
   return { ...totals, balance: totals.income - totals.expense, byMember: Object.fromEntries(members.map(row => [row.member, row.total])) };
+}
+function summaryText(data) {
+  return 'Quỹ còn: ' + money(data.balance) + '\nPhi đã góp: ' + money(data.byMember.Phi || 0) + '\nAn đã góp: ' + money(data.byMember.An || 0) + '\nTổng chi: ' + money(data.expense) + '\nCần hoàn ứng: ' + money(data.due);
 }
 async function telegram(env, method, body) {
   const form = body instanceof FormData;
@@ -115,9 +118,9 @@ function csvCell(value) {
   return /[",\n\r]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
 }
 async function sendCsv(env, db, chatId) {
-  const rows = await all(db, 'SELECT * FROM transactions ORDER BY id');
-  const columns = ['id','occurred_on','kind','amount_vnd','member','description','category','paid_by','reimbursed_vnd','status','note','deleted_at','source_sheet','source_row'];
-  const headers = ['ID','Ngày','Loại','Số tiền VND','Thành viên góp','Nội dung','Nhóm chi','Người ứng','Đã hoàn VND','Trạng thái','Ghi chú','Đã hủy','Nguồn','Dòng nguồn'];
+  const rows = await all(db, 'SELECT * FROM transactions ORDER BY created_at DESC,id DESC');
+  const columns = ['id','created_at','occurred_on','kind','amount_vnd','member','description','category','paid_by','reimbursed_vnd','status','note','deleted_at','source_sheet','source_row'];
+  const headers = ['ID','Ngày thêm','Ngày giao dịch','Loại','Số tiền VND','Thành viên góp','Nội dung','Nhóm chi','Người ứng','Đã hoàn VND','Trạng thái','Ghi chú','Đã hủy','Nguồn','Dòng nguồn'];
   const body = '\ufeff' + [headers.join(','), ...rows.map(row => columns.map(key => csvCell(key === 'kind' ? (row.kind === 'contribution' ? 'Thu' : 'Chi') : row[key])).join(','))].join('\r\n');
   const form = new FormData();
   form.append('chat_id', String(chatId));
@@ -186,13 +189,9 @@ async function makeNotification(db, item) {
     const text = change.action === 'delete' ? 'Yêu cầu hủy giao dịch #' + change.transaction_id : 'Yêu cầu sửa ' + FIELDS[change.field] + ' của giao dịch #' + change.transaction_id + ' thành: ' + (change.proposed_value ?? 'quy');
     return { text, markup: keyboard([[button('✅ Duyệt', 'change:approve:' + change.id), button('❌ Từ chối', 'change:reject:' + change.id)]]) };
   }
-  if (item.event === 'receive_reimbursement') {
-    const request = await first(db, 'SELECT r.*,t.paid_by FROM reimbursement_requests r JOIN transactions t ON t.id=r.transaction_id WHERE r.id=?', item.reference_id);
-    if (!request || request.status !== 'sent') return null;
-    const text = request.paid_by === HOLDER
-      ? 'An đã ghi nhận lấy ' + money(request.amount_vnd) + ' từ quỹ để hoàn ứng #' + request.transaction_id + '. Phi xác nhận giúp.'
-      : 'An đã đánh dấu chuyển ' + money(request.amount_vnd) + ' để hoàn ứng #' + request.transaction_id + '. Phi đã nhận được tiền chưa?';
-    return { text, markup: keyboard([[button('✅ Đã nhận / xác nhận', 'receive:' + request.id), button('❌ Chưa nhận', 'not_received:' + request.id)]]) };
+  if (item.event === 'reimbursed') {
+    const row = await first(db, 'SELECT * FROM transactions WHERE id=?', item.reference_id);
+    return row ? { text: 'An đã đánh dấu hoàn khoản ứng #' + row.id + '.', markup: back() } : null;
   }
   if (item.event === 'approved_change' || item.event === 'rejected_change') {
     const change = await first(db, 'SELECT * FROM change_requests WHERE id=?', item.reference_id);
@@ -205,9 +204,7 @@ async function makeNotification(db, item) {
   if (!row) return null;
   const labels = {
     approved_tx: 'Giao dịch #' + row.id + ' đã được duyệt.',
-    rejected_tx: 'Giao dịch #' + row.id + ' đã bị từ chối.',
-    received_reimbursement: 'Khoản hoàn ứng #' + row.id + ' đã được xác nhận.',
-    not_received_reimbursement: 'Khoản hoàn ứng #' + row.id + ' chưa được xác nhận đã nhận.'
+    rejected_tx: 'Giao dịch #' + row.id + ' đã bị từ chối.'
   };
   if (labels[item.event]) return { text: labels[item.event], markup: back() };
   return null;
@@ -236,6 +233,18 @@ async function createTransaction(db, updateId, userId, member, kind, text) {
   const row = await first(db, 'SELECT * FROM transactions WHERE source_update_id=?', updateId);
   return { reply: 'Đã gửi ' + other(member) + ' duyệt. Quỹ chỉ thay đổi sau khi được duyệt.\n\n' + rowText(row), markup: transactionButtons(row, member, userId), committed: true };
 }
+async function reimburse(db, updateId, userId, rows) {
+  if (!rows.length) throw new UserError('Không có khoản nào cần hoàn.');
+  const statements = [];
+  for (const row of rows) {
+    statements.push(sql(db, "UPDATE reimbursement_requests SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE transaction_id=? AND status='sent'", row.id));
+    statements.push(sql(db, 'UPDATE transactions SET reimbursed_vnd=amount_vnd,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=\'confirmed\' AND deleted_at IS NULL AND reimbursed_vnd<amount_vnd', row.id));
+    statements.push(audit(db, row.id, 'reimburse', userId, row, { ...row, reimbursed_vnd: row.amount_vnd }));
+    if (row.paid_by !== HOLDER) statements.push(queue(db, row.paid_by, 'reimbursed', row.id));
+  }
+  await commit(db, updateId, statements);
+  return rows.reduce((total, row) => total + row.amount_vnd - row.reimbursed_vnd, 0);
+}
 async function applyEdit(db, updateId, userId, member, txId, field, value) {
   const before = await transaction(db, txId);
   const parsed = parseEdit(field, value, before);
@@ -245,7 +254,7 @@ async function applyEdit(db, updateId, userId, member, txId, field, value) {
     await commit(db, updateId, [sql(db, 'UPDATE transactions SET ' + column + '=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', parsed, txId), audit(db, txId, 'edit:' + field, userId, before, after)]);
     return { reply: 'Đã sửa khoản đang chờ duyệt:\n' + rowText(after), markup: transactionButtons(after, member, userId), committed: true };
   }
-  if (await openReimbursement(db, txId) && ['tien','ung'].includes(field)) throw new UserError('Khoản này đang chờ xác nhận hoàn ứng; hãy xử lý khoản hoàn trước khi sửa số tiền hoặc người ứng.');
+  if (await openReimbursement(db, txId) && ['tien','ung'].includes(field)) throw new UserError('Khoản này có yêu cầu hoàn ứng cũ; An cần hoàn khoản này trước khi sửa số tiền hoặc người ứng.');
   if (await first(db, "SELECT id FROM change_requests WHERE transaction_id=? AND status='pending'", txId)) throw new UserError('Giao dịch đã có yêu cầu sửa hoặc hủy đang chờ duyệt.');
   await commit(db, updateId, [
     sql(db, "INSERT INTO change_requests(transaction_id,action,field,proposed_value,requested_by,status) VALUES(?,'edit',?,?,?,'pending')", txId, field, parsed === null ? null : String(parsed), userId),
@@ -265,10 +274,10 @@ async function handle(db, env, event, updateId) {
     return createTransaction(db, updateId, userId, member, input.kind, input.value);
   }
   if (event.text === '/start') return { reply: 'Chào ' + member + '! Bấm ☰ Menu để ghi quỹ phòng. Mọi giao dịch mới sẽ được người còn lại duyệt.', markup: MENU_BUTTON };
-  if (action === 'm') return { reply: 'Bạn muốn làm gì?', markup: menu() };
+  if (action === 'm') return { reply: summaryText(await summary(db)), markup: menu() };
   if (action === 'balance') {
     const data = await summary(db);
-    return { reply: 'Quỹ còn: ' + money(data.balance) + '\nPhi đã góp: ' + money(data.byMember.Phi || 0) + '\nAn đã góp: ' + money(data.byMember.An || 0) + '\nTổng chi: ' + money(data.expense) + '\nCần hoàn ứng: ' + money(data.due), markup: back() };
+    return { reply: summaryText(data), markup: back() };
   }
   if (['new:contribution','new:expense','new:advance'].includes(action)) {
     const prompts = {
@@ -279,24 +288,24 @@ async function handle(db, env, event, updateId) {
     return { reply: prompts[action], markup: { force_reply: true, input_field_placeholder: 'Số tiền và nội dung' } };
   }
   if (action === 'pending') {
-    const tx = await all(db, "SELECT * FROM transactions WHERE status='pending' AND deleted_at IS NULL AND (created_by IS NULL OR created_by<>?) ORDER BY id DESC LIMIT 10", userId);
-    const changes = await all(db, "SELECT * FROM change_requests WHERE status='pending' AND requested_by<>? ORDER BY id DESC LIMIT 10", userId);
-    const reimbursements = member === 'Phi' ? await all(db, "SELECT * FROM reimbursement_requests WHERE status='sent' ORDER BY id DESC LIMIT 10") : [];
-    const rows = [
-      ...tx.map(row => [button('#' + row.id + ' · ' + (row.kind === 'contribution' ? 'Góp' : 'Chi') + ' ' + money(row.amount_vnd), 'tx:' + row.id)]),
-      ...changes.map(row => [button('Sửa/hủy #' + row.transaction_id, 'change:view:' + row.id)]),
-      ...reimbursements.map(row => [button('Hoàn ứng #' + row.transaction_id + ' · ' + money(row.amount_vnd), 'reimbursement:view:' + row.id)]),
-      [button('‹ Menu', 'm')]
-    ];
+    const tx = await all(db, "SELECT * FROM transactions WHERE status='pending' AND deleted_at IS NULL AND (created_by IS NULL OR created_by<>?) ORDER BY created_at DESC,id DESC LIMIT 10", userId);
+    const changes = await all(db, "SELECT * FROM change_requests WHERE status='pending' AND requested_by<>? ORDER BY created_at DESC,id DESC LIMIT 10", userId);
+    const pending = [
+      ...tx.map(row => ({ created_at: row.created_at, id: row.id, button: button('#' + row.id + ' · ' + (row.kind === 'contribution' ? 'Góp' : 'Chi') + ' ' + money(row.amount_vnd), 'tx:' + row.id) })),
+      ...changes.map(row => ({ created_at: row.created_at, id: row.id, button: button('Sửa/hủy #' + row.transaction_id, 'change:view:' + row.id) }))
+    ].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id).slice(0, 10);
+    const rows = [...pending.map(item => [item.button]), [button('‹ Menu', 'm')]];
     return { reply: rows.length === 1 ? 'Không có việc nào chờ bạn xác nhận.' : 'Các việc đang chờ bạn xác nhận:', markup: keyboard(rows) };
   }
   if (action === 'history') {
-    const rows = await all(db, 'SELECT * FROM transactions WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 10');
+    const rows = await all(db, 'SELECT * FROM transactions WHERE deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 10');
     return { reply: rows.length ? 'Giao dịch gần đây:\n' + rows.map(rowText).join('\n\n') : 'Chưa có giao dịch.', markup: keyboard([...rows.map(row => [button('#' + row.id + ' · ' + money(row.amount_vnd), 'tx:' + row.id)]), [button('‹ Menu', 'm')]]) };
   }
   if (action === 'due') {
-    const rows = await all(db, "SELECT * FROM transactions WHERE kind='expense' AND status='confirmed' AND paid_by IS NOT NULL AND reimbursed_vnd<amount_vnd AND deleted_at IS NULL ORDER BY id DESC LIMIT 20");
-    return { reply: rows.length ? 'Các khoản cần hoàn:\n' + rows.map(row => '#' + row.id + ' · ' + row.paid_by + ' · còn ' + money(row.amount_vnd - row.reimbursed_vnd)).join('\n') : 'Không có khoản nào cần hoàn.', markup: keyboard([...rows.map(row => [button('#' + row.id + ' · ' + money(row.amount_vnd - row.reimbursed_vnd), 'tx:' + row.id)]), [button('‹ Menu', 'm')]]) };
+    const rows = await all(db, "SELECT * FROM transactions WHERE kind='expense' AND status='confirmed' AND paid_by IS NOT NULL AND reimbursed_vnd<amount_vnd AND deleted_at IS NULL ORDER BY created_at DESC,id DESC");
+    const total = rows.reduce((sum, row) => sum + row.amount_vnd - row.reimbursed_vnd, 0);
+    const visible = rows.slice(0, 20);
+    return { reply: rows.length ? 'Các khoản cần hoàn (' + rows.length + '): ' + money(total) + '\n' + visible.map(row => '#' + row.id + ' · ' + row.paid_by + ' · còn ' + money(row.amount_vnd - row.reimbursed_vnd)).join('\n') + (rows.length > visible.length ? '\n…và ' + (rows.length - visible.length) + ' khoản khác.' : '') : 'Không có khoản nào cần hoàn.\nTổng cần hoàn: 0đ', markup: keyboard([...visible.map(row => [button('#' + row.id + ' · ' + money(row.amount_vnd - row.reimbursed_vnd), 'tx:' + row.id)]), ...(member === HOLDER && rows.length ? [[button('↩️ Hoàn toàn bộ · ' + money(total), 'reimburse:all')]] : []), [button('‹ Menu', 'm')]]) };
   }
   if (action === 'report') {
     const month = vnToday().slice(0, 7);
@@ -357,7 +366,7 @@ async function handle(db, env, event, updateId) {
       return { reply: 'Đã hủy giao dịch #' + row.id + '.', markup: back(), committed: true };
     }
     if (await first(db, "SELECT id FROM change_requests WHERE transaction_id=? AND status='pending'", row.id)) throw new UserError('Giao dịch đã có yêu cầu sửa hoặc hủy đang chờ duyệt.');
-    if (await openReimbursement(db, row.id)) throw new UserError('Khoản này đang chờ xác nhận hoàn ứng; hãy xử lý khoản hoàn trước khi hủy.');
+    if (await openReimbursement(db, row.id)) throw new UserError('Khoản này có yêu cầu hoàn ứng cũ; An cần hoàn khoản này trước khi hủy.');
     await commit(db, updateId, [
       sql(db, "INSERT INTO change_requests(transaction_id,action,requested_by,status) VALUES(?,'delete',?,'pending')", row.id, userId),
       sql(db, "INSERT INTO notification_outbox(recipient_member,event,reference_id) SELECT ?,'review_change',id FROM change_requests WHERE transaction_id=? AND status='pending'", other(member), row.id)
@@ -380,7 +389,7 @@ async function handle(db, env, event, updateId) {
     const approved = match[1] === 'approve';
     const statements = [];
     if (approved) {
-      if (await openReimbursement(db, row.id) && (change.action === 'delete' || ['tien','ung'].includes(change.field))) throw new UserError('Khoản này đang chờ xác nhận hoàn ứng; hãy xử lý khoản hoàn trước.');
+      if (await openReimbursement(db, row.id) && (change.action === 'delete' || ['tien','ung'].includes(change.field))) throw new UserError('Khoản này có yêu cầu hoàn ứng cũ; An cần hoàn khoản này trước.');
       if (change.action === 'delete') {
         statements.push(sql(db, 'UPDATE transactions SET deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?', row.id));
         statements.push(audit(db, row.id, 'delete', userId, row, { ...row, deleted_at: new Date().toISOString() }));
@@ -397,49 +406,33 @@ async function handle(db, env, event, updateId) {
     await commit(db, updateId, statements);
     return { reply: approved ? 'Đã duyệt thay đổi cho giao dịch #' + row.id + '.' : 'Đã từ chối yêu cầu sửa/hủy #' + row.id + '.', markup: back(), committed: true };
   }
-  match = /^send:([1-9]\d*)$/.exec(action || '');
+  if (action === 'reimburse:all') {
+    if (member !== HOLDER) throw new UserError('Chỉ An, người giữ quỹ, có thể đánh dấu hoàn ứng.');
+    const total = await first(db, "SELECT COUNT(*) count,COALESCE(SUM(amount_vnd-reimbursed_vnd),0) total FROM transactions WHERE kind='expense' AND status='confirmed' AND paid_by IS NOT NULL AND reimbursed_vnd<amount_vnd AND deleted_at IS NULL");
+    if (!total.count) throw new UserError('Không có khoản nào cần hoàn.');
+    return { reply: 'Xác nhận đã hoàn toàn bộ ' + total.count + ' khoản, tổng ' + money(total.total) + '?', markup: keyboard([[button('✅ Xác nhận hoàn toàn bộ', 'reimburse:all:yes:' + total.count + ':' + total.total)], [button('‹ Các khoản cần hoàn', 'due')]]) };
+  }
+  match = /^reimburse:all:yes:(\d+):(\d+)$/.exec(action || '');
   if (match) {
-    if (member !== HOLDER) throw new UserError('Chỉ An, người giữ quỹ, đánh dấu đã chuyển tiền hoàn.');
+    if (member !== HOLDER) throw new UserError('Chỉ An, người giữ quỹ, có thể đánh dấu hoàn ứng.');
+    const rows = await all(db, "SELECT * FROM transactions WHERE kind='expense' AND status='confirmed' AND paid_by IS NOT NULL AND reimbursed_vnd<amount_vnd AND deleted_at IS NULL ORDER BY created_at DESC,id DESC");
+    if (rows.length !== Number(match[1]) || rows.reduce((sum, row) => sum + row.amount_vnd - row.reimbursed_vnd, 0) !== Number(match[2])) throw new UserError('Các khoản cần hoàn đã thay đổi. Hãy mở danh sách và kiểm tra lại trước khi hoàn.');
+    const total = await reimburse(db, updateId, userId, rows);
+    return { reply: 'Đã hoàn toàn bộ ' + rows.length + ' khoản, tổng ' + money(total) + '. Quỹ không bị trừ thêm.', markup: back(), committed: true };
+  }
+  match = /^(?:reimburse|send):([1-9]\d*)$/.exec(action || '');
+  if (match) {
+    if (member !== HOLDER) throw new UserError('Chỉ An, người giữ quỹ, có thể đánh dấu hoàn ứng.');
     const row = await transaction(db, positiveId(match[1]));
     if (row.kind !== 'expense' || row.status !== 'confirmed' || !row.paid_by || row.reimbursed_vnd >= row.amount_vnd) throw new UserError('Khoản này không còn cần hoàn ứng.');
-    if (await openReimbursement(db, row.id)) throw new UserError('Khoản hoàn này đang chờ Phi xác nhận.');
-    if (await first(db, "SELECT id FROM change_requests WHERE transaction_id=? AND status='pending'", row.id)) throw new UserError('Giao dịch đang chờ duyệt sửa/hủy; hãy xử lý yêu cầu đó trước.');
-    const remaining = row.amount_vnd - row.reimbursed_vnd;
-    await commit(db, updateId, [
-      sql(db, "INSERT INTO reimbursement_requests(transaction_id,amount_vnd,status,sent_by) VALUES(?,?,'sent',?)", row.id, remaining, userId),
-      sql(db, "INSERT INTO notification_outbox(recipient_member,event,reference_id) SELECT 'Phi','receive_reimbursement',id FROM reimbursement_requests WHERE transaction_id=? AND status='sent'", row.id)
-    ]);
-    return { reply: 'Đã báo Phi xác nhận ' + money(remaining) + '. Khoản cần hoàn vẫn còn cho đến khi Phi bấm đã nhận.', markup: back(), committed: true };
+    const total = await reimburse(db, updateId, userId, [row]);
+    return { reply: 'Đã hoàn ' + money(total) + ' cho khoản #' + row.id + '. Quỹ không bị trừ thêm.', markup: back(), committed: true };
   }
-  match = /^reimbursement:view:([1-9]\d*)$/.exec(action || '');
-  if (match) {
-    const request = await first(db, 'SELECT * FROM reimbursement_requests WHERE id=?', positiveId(match[1]));
-    if (!request || request.status !== 'sent') throw new UserError('Khoản này đã được xử lý.');
-    if (member !== 'Phi') throw new UserError('Chỉ Phi có thể xác nhận khoản hoàn này.');
-    return { reply: 'An đã đánh dấu chuyển ' + money(request.amount_vnd) + ' cho khoản #' + request.transaction_id + '. Bạn đã nhận chưa?', markup: keyboard([[button('✅ Đã nhận', 'receive:' + request.id), button('❌ Chưa nhận', 'not_received:' + request.id)]]) };
-  }
-  match = /^(receive|not_received):([1-9]\d*)$/.exec(action || '');
-  if (match) {
-    if (member !== 'Phi') throw new UserError('Chỉ Phi có thể xác nhận khoản hoàn này.');
-    const request = await first(db, 'SELECT * FROM reimbursement_requests WHERE id=?', positiveId(match[2]));
-    if (!request || request.status !== 'sent') throw new UserError('Khoản này đã được xử lý.');
-    if (request.sent_by === userId) throw new UserError('Người chuyển không thể tự xác nhận.');
-    const row = await transaction(db, request.transaction_id);
-    const received = match[1] === 'receive';
-    if (received && row.reimbursed_vnd + request.amount_vnd > row.amount_vnd) throw new UserError('Số tiền hoàn vượt quá khoản còn nợ.');
-    const statements = [sql(db, "UPDATE reimbursement_requests SET status=?,received_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='sent'", received ? 'received' : 'cancelled', userId, request.id)];
-    if (received) {
-      statements.push(sql(db, 'UPDATE transactions SET reimbursed_vnd=reimbursed_vnd+?,updated_at=CURRENT_TIMESTAMP WHERE id=?', request.amount_vnd, row.id));
-      statements.push(audit(db, row.id, 'reimburse', userId, row, { ...row, reimbursed_vnd: row.reimbursed_vnd + request.amount_vnd }));
-    }
-    statements.push(queue(db, HOLDER, received ? 'received_reimbursement' : 'not_received_reimbursement', row.id));
-    await commit(db, updateId, statements);
-    return { reply: received ? 'Đã xác nhận nhận ' + money(request.amount_vnd) + '. Khoản cần hoàn đã được cập nhật.' : 'Đã báo An là bạn chưa nhận được tiền. Khoản cần hoàn vẫn giữ nguyên.', markup: back(), committed: true };
-  }
+  if (/^(?:reimbursement:view|receive|not_received):[1-9]\d*$/.test(action || '')) return { reply: 'Luồng hoàn ứng đã thay đổi. An đánh dấu hoàn trực tiếp trong Các khoản cần hoàn.', markup: back() };
   match = /^audit:([1-9]\d*)$/.exec(action || '');
   if (match) {
     const txId = positiveId(match[1]);
-    const rows = await all(db, 'SELECT action,created_at FROM audit WHERE transaction_id=? ORDER BY id DESC LIMIT 10', txId);
+    const rows = await all(db, 'SELECT action,created_at FROM audit WHERE transaction_id=? ORDER BY created_at DESC,id DESC LIMIT 10', txId);
     return { reply: rows.length ? 'Nhật ký #' + txId + ':\n' + rows.map(row => row.created_at + ' · ' + row.action).join('\n') : 'Chưa có nhật ký.', markup: keyboard([[button('‹ Giao dịch', 'tx:' + txId)]]) };
   }
   return { reply: 'Bấm ☰ Menu để dùng bot.', markup: MENU_BUTTON };

@@ -74,7 +74,7 @@ test('only configured usernames and pinned Telegram IDs can use buttons', async 
   assert.match(oldCommand.reply, /Bấm ☰ Menu/);
 });
 
-test('every new transaction waits for the other person; reimbursement needs two steps', async () => {
+test('every new transaction waits for the other person; An completes reimbursement directly', async () => {
   const { db, sqlite } = database();
   await startBoth(db);
   const contribution = await handle(db, env, reply(phi, 'Nhập khoản góp\nGửi số tiền và nội dung', '1000k góp quỹ'), 3);
@@ -91,15 +91,13 @@ test('every new transaction waits for the other person; reimbursement needs two 
   let balance = (await handle(db, env, event(phi, 'balance'), 11)).reply;
   assert.match(balance, /Quỹ còn: 980.000đ/);
   assert.match(balance, /Cần hoàn ứng: 20.000đ/);
-  await handle(db, env, event(an, 'send:2'), 12);
-  balance = (await handle(db, env, event(phi, 'balance'), 13)).reply;
-  assert.match(balance, /Cần hoàn ứng: 20.000đ/);
-  await assert.rejects(() => handle(db, env, event(an, 'receive:1'), 14), /Chỉ Phi/);
-  await handle(db, env, event(phi, 'receive:1'), 15);
-  balance = (await handle(db, env, event(phi, 'balance'), 16)).reply;
+  await assert.rejects(() => handle(db, env, event(phi, 'reimburse:2'), 12), /Chỉ An/);
+  await handle(db, env, event(an, 'reimburse:2'), 13);
+  balance = (await handle(db, env, event(phi, 'balance'), 14)).reply;
   assert.match(balance, /Quỹ còn: 980.000đ/);
   assert.match(balance, /Cần hoàn ứng: 0đ/);
-  assert.equal(sqlite.prepare('SELECT status FROM reimbursement_requests WHERE id=1').get().status, 'received');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) count FROM reimbursement_requests').get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM audit WHERE action='reimburse'").get().count, 1);
 });
 
 test('confirmed edits wait for peer approval and preserve old value until then', async () => {
@@ -126,17 +124,59 @@ test('An also needs Phi approval; rejected expenses never reduce the fund', asyn
   assert.ok(sqlite.prepare('SELECT deleted_at FROM transactions WHERE id=1').get().deleted_at);
 });
 
-test('not received keeps reimbursement outstanding so An can resend', async () => {
+test('due shows full total and An can reimburse all without reducing fund twice', async () => {
   const { db, sqlite } = database();
   await startBoth(db);
   await handle(db, env, reply(phi, 'Nhập khoản ứng\nGửi số tiền và nội dung', '20k rau'), 3);
   await handle(db, env, event(an, 'approve:1'), 4);
-  await handle(db, env, event(an, 'send:1'), 5);
-  await handle(db, env, event(phi, 'not_received:1'), 6);
-  assert.equal(sqlite.prepare('SELECT reimbursed_vnd FROM transactions WHERE id=1').get().reimbursed_vnd, 0);
+  await handle(db, env, reply(phi, 'Nhập khoản ứng\nGửi số tiền và nội dung', '6k muối'), 5);
+  await handle(db, env, event(an, 'approve:2'), 6);
+  const due = await handle(db, env, event(an, 'due'), 7);
+  assert.match(due.reply, /26.000đ/);
+  assert.deepEqual(due.markup.inline_keyboard.slice(0, 2).map(row => row[0].callback_data), ['tx:2', 'tx:1']);
+  assert.equal(due.markup.inline_keyboard[2][0].callback_data, 'reimburse:all');
+  assert.equal((await handle(db, env, event(phi, 'due'), 8)).markup.inline_keyboard.some(row => row[0].callback_data === 'reimburse:all'), false);
+  await assert.rejects(() => handle(db, env, event(phi, 'reimburse:all:yes:2:26000'), 9), /Chỉ An/);
+  const confirm = await handle(db, env, event(an, 'reimburse:all'), 10);
+  assert.match(confirm.reply, /26.000đ/);
+  const confirmAction = confirm.markup.inline_keyboard[0][0].callback_data;
+  assert.equal(confirmAction, 'reimburse:all:yes:2:26000');
+  await handle(db, env, event(an, confirmAction), 11);
+  assert.deepEqual(sqlite.prepare('SELECT reimbursed_vnd FROM transactions ORDER BY id').all().map(row => row.reimbursed_vnd), [20000, 6000]);
+  const menu = await handle(db, env, event(phi, 'm'), 12);
+  assert.match(menu.reply, /Quỹ còn: -26.000đ/);
+  assert.match(menu.reply, /Cần hoàn ứng: 0đ/);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) count FROM audit WHERE action='reimburse'").get().count, 2);
+  await assert.rejects(() => handle(db, env, event(an, confirmAction), 13), /đã thay đổi/);
+});
+
+test('menu totals come from confirmed transactions and history uses creation time', async () => {
+  const { db, sqlite } = database();
+  await startBoth(db);
+  sqlite.exec("INSERT INTO transactions(occurred_on,kind,amount_vnd,description,member,status,created_at) VALUES ('2026-09-01','contribution',11908001,'Phi góp','Phi','confirmed','2026-09-01 00:00:00'),('2026-08-01','contribution',11908000,'An góp','An','confirmed','2026-09-03 00:00:00'),('2026-09-02','expense',23368001,'Chi','An','confirmed','2026-09-02 00:00:00'),('2026-09-01','expense',6000,'Phi ứng',NULL,'confirmed','2026-09-04 00:00:00')");
+  sqlite.exec("UPDATE transactions SET paid_by='Phi' WHERE id=4");
+  const menu = await handle(db, env, event(phi, 'm'), 3);
+  assert.match(menu.reply, /Quỹ còn: 442.000đ/);
+  assert.match(menu.reply, /Phi đã góp: 11.908.001đ/);
+  assert.match(menu.reply, /An đã góp: 11.908.000đ/);
+  assert.match(menu.reply, /Tổng chi: 23.374.001đ/);
+  assert.match(menu.reply, /Cần hoàn ứng: 6.000đ/);
+  const history = await handle(db, env, event(phi, 'history'), 4);
+  assert.deepEqual(history.markup.inline_keyboard.slice(0, 4).map(row => row[0].callback_data), ['tx:4', 'tx:2', 'tx:3', 'tx:1']);
+});
+
+test('old reimbursement requests are closed when An reimburses and due order follows creation time', async () => {
+  const { db, sqlite } = database();
+  await startBoth(db);
+  sqlite.exec("INSERT INTO transactions(occurred_on,kind,amount_vnd,description,paid_by,status,created_at) VALUES ('2026-09-29','expense',6000,'Mới theo ID','Phi','confirmed','2026-09-01 00:00:00'),('2026-09-01','expense',20000,'Mới theo ngày thêm','Phi','confirmed','2026-09-03 00:00:00')");
+  sqlite.exec("INSERT INTO reimbursement_requests(transaction_id,amount_vnd,status,sent_by) VALUES(1,6000,'sent',202)");
+  const due = await handle(db, env, event(an, 'due'), 3);
+  assert.deepEqual(due.markup.inline_keyboard.slice(0, 2).map(row => row[0].callback_data), ['tx:2', 'tx:1']);
+  await handle(db, env, event(an, 'send:1'), 4);
   assert.equal(sqlite.prepare('SELECT status FROM reimbursement_requests WHERE id=1').get().status, 'cancelled');
-  await handle(db, env, event(an, 'send:1'), 7);
-  assert.equal(sqlite.prepare('SELECT status FROM reimbursement_requests WHERE id=2').get().status, 'sent');
+  assert.equal(sqlite.prepare('SELECT reimbursed_vnd FROM transactions WHERE id=1').get().reimbursed_vnd, 6000);
+  const oldButton = await handle(db, env, event(phi, 'receive:1'), 5);
+  assert.match(oldButton.reply, /Luồng hoàn ứng đã thay đổi/);
 });
 
 test('webhook sends action buttons to the other member after a new entry', async () => {
