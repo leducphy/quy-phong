@@ -11,6 +11,10 @@ Mã nguồn của bot Telegram quản lý quỹ phòng, đang chạy trên Cloud
 
 Giao dịch, bản sao SQLite, tệp xuất CSV và thông tin đăng nhập **không nằm trong repo này**. Dữ liệu hiện tại được lưu trên Cloudflare D1; cập nhật mã không nhập lại dữ liệu cũ.
 
+## Dùng nút bấm
+
+Nhắn riêng `/start` cho bot để hiện nút **☰ Menu**. Trong nhóm chung, gõ `/menu` để mở menu ngay trong cuộc trò chuyện. Menu có nút xem quỹ, giao dịch, ghi thu, ghi chi, ứng tiền, xem khoản cần hoàn và báo cáo tháng. Khi bot hỏi số tiền hoặc giá trị cần sửa, trả lời trực tiếp tin nhắn đó. Khoản thu vẫn cần bấm **Xác nhận đã nhận tiền** sau khi tiền thực sự được chuyển. Các lệnh cũ tiếp tục dùng được.
+
 ## Cập nhật bot
 
 Sửa mã trong `cloudflare/`, commit rồi push lên nhánh `main`. Cloudflare Workers Builds tự chạy `npm test` và, nếu kiểm tra đạt, chạy `npx wrangler deploy` cho Worker `quy-phong-301-bot`. Không cần để máy cá nhân bật. Xem trạng thái mỗi lần triển khai tại Cloudflare Workers & Pages → `quy-phong-301-bot` → Deployments.

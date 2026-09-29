@@ -17,6 +17,7 @@ const HELP = `Sổ quỹ phòng Phi & An
 /moi — lấy mã mời trong chat riêng
 /thamgia MÃ — tham gia trong chat riêng
 /nhom — chọn nhóm chung
+/menu — mở các nút bấm
 
 Số tiền: 50000, 50k, 1.000.000 hoặc 1,5tr.`;
 
@@ -45,13 +46,56 @@ function rowText(r) {
   if (r.status === 'pending') kind += ' [chờ xác nhận]';
   return `#${r.id} · ${r.occurred_on || 'chưa rõ ngày'} · ${kind} ${money(r.amount_vnd)} · ${r.description}`;
 }
+const button = (label, data) => ({ text: label, callback_data: data });
+const keyboard = rows => ({ inline_keyboard: rows });
+const menu = () => keyboard([
+  [button('💰 Xem quỹ', 'q'), button('📋 Giao dịch', 'l')],
+  [button('➕ Ghi thu', 'new:thu'), button('➖ Ghi chi', 'new:chi')],
+  [button('💳 Ứng tiền', 'new:ung'), button('🔄 Cần hoàn', 'u')],
+  [button('📊 Báo cáo tháng', 'b')]
+]);
+const back = () => keyboard([[button('‹ Menu', 'm')]]);
+function transactionButtons(r) {
+  const rows = [];
+  if (r.status === 'pending') rows.push([button('✅ Xác nhận đã nhận tiền', `confirm:${r.id}`)]);
+  if (r.paid_by && r.reimbursed_vnd < r.amount_vnd) rows.push([button('↩️ Ghi hoàn ứng', `reimburse:${r.id}`)]);
+  rows.push([button('✏️ Sửa', `edit:${r.id}`), button('🗑 Hủy', `delete:${r.id}`)]);
+  rows.push([button('‹ Giao dịch', 'l'), button('☰ Menu', 'm')]);
+  return keyboard(rows);
+}
+const EDIT_FIELDS = { tien: 'Số tiền', ngay: 'Ngày', noi_dung: 'Nội dung', loai: 'Loại chi', nguoi: 'Người góp', ung: 'Người ứng' };
+export function promptAction(msg) {
+  const prompt = msg.reply_to_message;
+  if (!prompt?.from?.is_bot || !msg.text || msg.text.startsWith('/')) return null;
+  const t = prompt.text || '';
+  let m = /^Ghi thu cho (Phi|An)\n/.exec(t);
+  if (m) return `/thu ${m[1]} ${msg.text}`;
+  if (t.startsWith('Ghi chi từ quỹ\n')) return `/chi ${msg.text}`;
+  if (t.startsWith('Ứng tiền cá nhân\n')) return `/ung ${msg.text}`;
+  m = /^Hoàn ứng #(\d+)\n/.exec(t);
+  if (m) return `/hoan ${m[1]} ${msg.text}`;
+  m = /^Sửa #(\d+) · (Số tiền|Ngày|Nội dung|Loại chi|Người góp|Người ứng)\n/.exec(t);
+  if (m) return `/sua ${m[1]} ${Object.keys(EDIT_FIELDS).find(k => EDIT_FIELDS[k] === m[2])} ${msg.text}`;
+  return null;
+}
+export function callbackCommand(data) {
+  const fixed = { m: '/menu', q: '/quy', l: '/lichsu', u: '/conung', b: '/baocao', 'new:thu': '/chonnguoi', 'new:chi': '/nhap chi', 'new:ung': '/nhap ung' };
+  if (fixed[data]) return fixed[data];
+  const newIncome = /^new:thu:(Phi|An)$/.exec(data || '');
+  if (newIncome) return `/nhapthu ${newIncome[1]}`;
+  const match = /^(tx|confirm|reimburse|edit|delete|delete_yes|ask):([1-9]\d*)(?::(tien|ngay|noi_dung|loai|nguoi|ung))?$/.exec(data || '');
+  if (!match) return '/menu';
+  const [, action, txId, field] = match;
+  if (action === 'ask' && field) return `/nhapsua ${txId} ${field}`;
+  return ({ tx: '/giaodich', confirm: '/xacnhan', reimburse: '/nhaphoan', edit: '/chonsua', delete: '/chonxoa', delete_yes: '/xoa' })[action] + ` ${txId}`;
+}
 async function telegram(env, method, body) {
   const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body), headers: body instanceof FormData ? {} : { 'content-type': 'application/json' } });
   const json = await r.json();
   if (!json.ok) throw Error(`Telegram ${method}: ${json.description || r.status}`);
   return json.result;
 }
-async function send(env, chatId, text) { return telegram(env, 'sendMessage', { chat_id: chatId, text: text.slice(0, 4000) }); }
+async function send(env, chatId, text, markup) { return telegram(env, 'sendMessage', { chat_id: chatId, text: text.slice(0, 4000), ...(markup ? { reply_markup: markup } : {}) }); }
 function audit(db, txId, action, actor, before, after) { return sql(db, 'INSERT INTO audit(transaction_id,action,actor_id,before_json,after_json) VALUES(?,?,?,?,?)', txId, action, actor, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null); }
 async function commit(db, updateId, statements) {
   await db.batch([sql(db, 'INSERT INTO processed_updates(update_id) VALUES(?)', updateId), ...statements]);
@@ -83,7 +127,7 @@ function date(raw) {
   return raw;
 }
 export async function handle(db, msg, updateId) {
-  const text = (msg.text || '').trim();
+  const text = (msg.text === '☰ Menu' ? '/menu' : promptAction(msg) || msg.text || '').trim();
   if (!text.startsWith('/')) return { reply: null };
   const [raw, ...words] = text.split(/\s+/);
   const cmd = raw.split('@')[0].toLowerCase();
@@ -93,11 +137,11 @@ export async function handle(db, msg, updateId) {
   let member = (await first(db, 'SELECT member FROM users WHERE telegram_id=?', userId))?.member;
   if (cmd === '/start') {
     if (!privateChat) return { reply: 'Hãy nhắn riêng bot để đăng ký, sau đó dùng /nhom tại nhóm chung.' };
-    if (member) return { reply: `Chào ${member}!\n\n${HELP}` };
+    if (member) return { reply: `Chào ${member}!\n\nBấm nút Menu để dùng bot, hoặc gõ /help để xem các lệnh.`, markup: { keyboard: [[{ text: '☰ Menu' }]], resize_keyboard: true, is_persistent: true } };
     const count = await first(db, 'SELECT COUNT(*) n FROM users');
     if (count.n) throw Error('Bot chỉ dành cho hai thành viên của phòng. Hãy xin mã mời từ người đã tham gia.');
     await commit(db, updateId, [sql(db, "INSERT INTO users(telegram_id,member) VALUES(?,'Phi')", userId)]);
-    return { reply: `Đã đăng ký bạn là Phi. Quỹ hiện có ${money((await summary(db)).balance)}.\n\n${HELP}`, committed: true };
+    return { reply: `Đã đăng ký bạn là Phi. Quỹ hiện có ${money((await summary(db)).balance)}.\n\nBấm nút Menu để dùng bot, hoặc gõ /help để xem các lệnh.`, markup: { keyboard: [[{ text: '☰ Menu' }]], resize_keyboard: true, is_persistent: true }, committed: true };
   }
   if (cmd === '/thamgia') {
     if (!privateChat) return { reply: 'Hãy gửi mã mời trong chat riêng với bot.' };
@@ -107,7 +151,7 @@ export async function handle(db, msg, updateId) {
     const invite = await first(db, "SELECT value FROM settings WHERE key='invite_code'");
     if (count.n !== 1 || !invite || invite.value !== words[0].toUpperCase()) throw Error('Mã mời không đúng hoặc phòng chưa sẵn sàng.');
     await commit(db, updateId, [sql(db, "INSERT INTO users(telegram_id,member) VALUES(?,'An')", userId), sql(db, "DELETE FROM settings WHERE key='invite_code'")]);
-    return { reply: 'Đã đăng ký bạn là An. Gõ /help để xem cách dùng.', committed: true };
+    return { reply: 'Đã đăng ký bạn là An. Bấm nút Menu để dùng bot.', markup: { keyboard: [[{ text: '☰ Menu' }]], resize_keyboard: true, is_persistent: true }, committed: true };
   }
   if (!member) return { reply: privateChat ? 'Bot chỉ dành cho Phi và An. Hãy nhắn riêng /start hoặc /thamgia MÃ.' : null };
   if (!privateChat) {
@@ -119,6 +163,34 @@ export async function handle(db, msg, updateId) {
     if (bound?.value !== String(chatId)) return { reply: null };
   } else if (cmd === '/nhom') return { reply: 'Hãy gõ /nhom trong nhóm Telegram có hai bạn và bot.' };
   if (['/help','/trogiup'].includes(cmd)) return { reply: HELP };
+  if (cmd === '/menu') return { reply: 'Bạn muốn làm gì với quỹ phòng?', markup: menu() };
+  if (cmd === '/chonnguoi') return { reply: 'Khoản thu này do ai góp?', markup: keyboard([[button('Phi', 'new:thu:Phi'), button('An', 'new:thu:An')], [button('‹ Menu', 'm')]]) };
+  if (cmd === '/nhap') {
+    const kind = words[0];
+    if (!['chi', 'ung'].includes(kind)) throw Error('Cách dùng: /nhap chi|ung');
+    return { reply: kind === 'chi' ? 'Ghi chi từ quỹ\nNhập số tiền và nội dung, ví dụ: 50k mua nước.' : 'Ứng tiền cá nhân\nNhập số tiền và nội dung, ví dụ: 50k mua nước.', markup: { force_reply: true, input_field_placeholder: '50k mua nước' } };
+  }
+  if (cmd === '/nhapthu') {
+    if (!MEMBERS.includes(words[0])) throw Error('Người góp chỉ có thể là Phi hoặc An.');
+    return { reply: `Ghi thu cho ${words[0]}\nNhập số tiền và nội dung, ví dụ: 500k góp quỹ.`, markup: { force_reply: true, input_field_placeholder: '500k góp quỹ' } };
+  }
+  if (cmd === '/giaodich' || cmd === '/chonsua' || cmd === '/chonxoa' || cmd === '/nhaphoan' || cmd === '/nhapsua') {
+    const r = await transaction(db, id(words[0]));
+    if (cmd === '/giaodich') return { reply: rowText(r), markup: transactionButtons(r) };
+    if (cmd === '/chonsua') {
+      const fields = r.kind === 'contribution' ? ['tien','ngay','noi_dung','nguoi'] : ['tien','ngay','noi_dung','loai','ung'];
+      return { reply: `Bạn muốn sửa gì ở giao dịch #${r.id}?\n${rowText(r)}`, markup: keyboard([...fields.map(f => [button(EDIT_FIELDS[f], `ask:${r.id}:${f}`)]), [button('‹ Giao dịch', `tx:${r.id}`)]]) };
+    }
+    if (cmd === '/chonxoa') return { reply: `Hủy giao dịch #${r.id}?\n${rowText(r)}`, markup: keyboard([[button('🗑 Xác nhận hủy', `delete_yes:${r.id}`)], [button('Giữ giao dịch', `tx:${r.id}`)]]) };
+    if (cmd === '/nhaphoan') {
+      if (r.kind !== 'expense' || !r.paid_by || r.reimbursed_vnd >= r.amount_vnd) throw Error('Giao dịch này không có khoản ứng cần hoàn.');
+      return { reply: `Hoàn ứng #${r.id}\nCòn cần hoàn ${money(r.amount_vnd - r.reimbursed_vnd)} cho ${r.paid_by}. Nhập số tiền đã hoàn, ví dụ: 50k.`, markup: { force_reply: true, input_field_placeholder: 'Số tiền đã hoàn' } };
+    }
+    const field = words[1];
+    if (!EDIT_FIELDS[field] || (r.kind === 'contribution' && ['loai','ung'].includes(field)) || (r.kind === 'expense' && field === 'nguoi')) throw Error('Có thể sửa: tien, ngay, noi_dung, loai, nguoi, ung.');
+    const hints = { tien: '50k', ngay: '2026-09-29', noi_dung: 'Nội dung mới', loai: 'Tiền phòng hoặc Sinh hoạt', nguoi: 'Phi hoặc An', ung: 'Phi, An hoặc quy' };
+    return { reply: `Sửa #${r.id} · ${EDIT_FIELDS[field]}\nNhập giá trị mới, ví dụ: ${hints[field]}.`, markup: { force_reply: true, input_field_placeholder: hints[field] } };
+  }
   if (cmd === '/moi') {
     if (!privateChat) return { reply: 'Hãy nhắn riêng bot để lấy mã mời.' };
     if ((await first(db, 'SELECT COUNT(*) n FROM users')).n >= 2) throw Error('Hai thành viên đã tham gia đủ.');
@@ -133,7 +205,7 @@ export async function handle(db, msg, updateId) {
   }
   if (cmd === '/quy') {
     const s = await summary(db);
-    return { reply: `Quỹ còn: ${money(s.balance)}\nĐã góp: ${MEMBERS.map(m => `${m} ${money(s.byMember[m] || 0)}`).join(', ')}\nTổng chi: ${money(s.expense)}\nChưa hoàn ứng: ${money(s.due)}` };
+    return { reply: `Quỹ còn: ${money(s.balance)}\nĐã góp: ${MEMBERS.map(m => `${m} ${money(s.byMember[m] || 0)}`).join(', ')}\nTổng chi: ${money(s.expense)}\nChưa hoàn ứng: ${money(s.due)}`, markup: back() };
   }
   if (['/thu','/chi','/ung'].includes(cmd)) {
     let payer = member;
@@ -146,7 +218,7 @@ export async function handle(db, msg, updateId) {
     const category = kind === 'expense' ? (/tiền phòng|tiền trọ/i.test(description) ? 'Tiền phòng' : 'Sinh hoạt') : null;
     await commit(db, updateId, [sql(db, `INSERT INTO transactions(occurred_on,kind,amount_vnd,description,member,category,paid_by,status,created_by,source_update_id) VALUES(?,?,?,?,?,?,?,?,?,?)`, vnToday(), kind, value, description, kind === 'contribution' ? payer : null, category, paidBy, kind === 'contribution' ? 'pending' : 'confirmed', userId, updateId), sql(db, `INSERT INTO audit(transaction_id,action,actor_id,after_json) SELECT id,'create',?,json_object('amount_vnd',amount_vnd,'occurred_on',occurred_on,'description',description,'member',member,'category',category,'paid_by',paid_by,'reimbursed_vnd',reimbursed_vnd,'status',status,'deleted_at',deleted_at) FROM transactions WHERE source_update_id=?`, userId, updateId)]);
     const r = await first(db, 'SELECT * FROM transactions WHERE source_update_id=?', updateId);
-    return { reply: rowText(r) + (kind === 'contribution' ? `\nChờ /xacnhan ${r.id} khi đã nhận tiền.` : `\nĐã trừ toàn bộ khoản chi vào quỹ.${paidBy ? `\nQuỹ cần hoàn cho ${paidBy}: ${money(value)}` : ''}`), committed: true };
+    return { reply: rowText(r) + (kind === 'contribution' ? `\nChờ xác nhận khi đã nhận tiền.` : `\nĐã trừ toàn bộ khoản chi vào quỹ.${paidBy ? `\nQuỹ cần hoàn cho ${paidBy}: ${money(value)}` : ''}`), markup: transactionButtons(r), committed: true };
   }
   if (cmd === '/xacnhan') {
     if (words.length !== 1) throw Error('Cách dùng: /xacnhan ID');
@@ -154,7 +226,7 @@ export async function handle(db, msg, updateId) {
     if (before.status === 'confirmed') throw Error('Giao dịch đã được xác nhận.');
     const after = { ...before, status: 'confirmed', confirmed_by: userId };
     await commit(db, updateId, [sql(db, "UPDATE transactions SET status='confirmed',confirmed_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'", userId, before.id), audit(db, before.id, 'confirm', userId, before, after)]);
-    return { reply: `Đã xác nhận: ${rowText(after)}`, committed: true };
+    return { reply: `Đã xác nhận: ${rowText(after)}`, markup: transactionButtons(after), committed: true };
   }
   if (cmd === '/hoan') {
     if (words.length !== 2) throw Error('Cách dùng: /hoan ID SỐ_TIỀN');
@@ -164,11 +236,11 @@ export async function handle(db, msg, updateId) {
     if (value > remaining) throw Error(`Số tiền hoàn không quá ${money(remaining)}.`);
     const after = { ...before, reimbursed_vnd: before.reimbursed_vnd + value };
     await commit(db, updateId, [sql(db, 'UPDATE transactions SET reimbursed_vnd=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND reimbursed_vnd=?', after.reimbursed_vnd, before.id, before.reimbursed_vnd), audit(db, before.id, 'reimburse', userId, before, after)]);
-    return { reply: `Đã ghi hoàn ứng cho ${before.paid_by}. Còn cần hoàn: ${money(before.amount_vnd - after.reimbursed_vnd)}. Số dư quỹ không đổi vì khoản chi đã được trừ khi ghi.`, committed: true };
+    return { reply: `Đã ghi hoàn ứng cho ${before.paid_by}. Còn cần hoàn: ${money(before.amount_vnd - after.reimbursed_vnd)}. Số dư quỹ không đổi vì khoản chi đã được trừ khi ghi.`, markup: transactionButtons(after), committed: true };
   }
   if (cmd === '/conung') {
     const rows = await all(db, `SELECT * FROM transactions WHERE kind='expense' AND status='confirmed' AND paid_by IS NOT NULL AND reimbursed_vnd<amount_vnd AND deleted_at IS NULL ORDER BY id DESC LIMIT 20`);
-    return { reply: rows.length ? `Khoản cần hoàn:\n${rows.map(r => `${rowText(r)} · còn ${money(r.amount_vnd-r.reimbursed_vnd)}`).join('\n')}` : 'Không có khoản ứng nào đang chờ hoàn.' };
+    return { reply: rows.length ? `Khoản cần hoàn:\n${rows.map(r => `${rowText(r)} · còn ${money(r.amount_vnd-r.reimbursed_vnd)}`).join('\n')}` : 'Không có khoản ứng nào đang chờ hoàn.', markup: keyboard([...rows.slice(0, 10).map(r => [button(`#${r.id} · hoàn ${money(r.amount_vnd-r.reimbursed_vnd)}`, `tx:${r.id}`)]), [button('‹ Menu', 'm')]]) };
   }
   if (cmd === '/sua') {
     if (words.length < 3) throw Error('Cách dùng: /sua ID tien|ngay|noi_dung|loai|nguoi|ung giá_trị');
@@ -185,13 +257,13 @@ export async function handle(db, msg, updateId) {
     else { if (before.kind !== 'expense') throw Error('Chỉ khoản chi mới có người ứng.'); parsed = value.toLowerCase() === 'quy' ? null : value; if (parsed !== null && !MEMBERS.includes(parsed)) throw Error("Người ứng chỉ có thể là Phi hoặc An; dùng 'quy' nếu chi từ quỹ."); if (parsed === null && before.reimbursed_vnd) throw Error('Khoản đã hoàn ứng, không thể đổi sang chi từ quỹ.'); }
     const after = { ...before, [column]: parsed };
     await commit(db, updateId, [sql(db, `UPDATE transactions SET ${column}=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, parsed, before.id), audit(db, before.id, `edit:${field}`, userId, before, after)]);
-    return { reply: `Đã sửa: ${rowText(after)}`, committed: true };
+    return { reply: `Đã sửa: ${rowText(after)}`, markup: transactionButtons(after), committed: true };
   }
   if (cmd === '/xoa') {
     if (words.length !== 1) throw Error('Cách dùng: /xoa ID');
     const before = await transaction(db, id(words[0])), after = { ...before, deleted_at: new Date().toISOString() };
     await commit(db, updateId, [sql(db, 'UPDATE transactions SET deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?', before.id), audit(db, before.id, 'delete', userId, before, after)]);
-    return { reply: `Đã hủy giao dịch #${before.id}. Nhật ký sửa vẫn được giữ.`, committed: true };
+    return { reply: `Đã hủy giao dịch #${before.id}. Nhật ký sửa vẫn được giữ.`, markup: back(), committed: true };
   }
   if (cmd === '/nhatky') {
     if (words.length !== 1) throw Error('Cách dùng: /nhatky ID');
@@ -202,7 +274,7 @@ export async function handle(db, msg, updateId) {
   if (cmd === '/lichsu') {
     const limit = words.length ? Math.min(id(words[0]), 30) : 10;
     const rows = await all(db, 'SELECT * FROM transactions WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?', limit);
-    return { reply: `Giao dịch gần đây:\n${rows.map(rowText).join('\n')}` };
+    return { reply: `Giao dịch gần đây:\n${rows.map(rowText).join('\n')}`, markup: keyboard([...rows.map(r => [button(`#${r.id} · ${r.kind === 'contribution' ? 'Thu' : 'Chi'} ${money(r.amount_vnd)}`, `tx:${r.id}`)]), [button('‹ Menu', 'm')]]) };
   }
   if (cmd === '/baocao') {
     const month = words[0] || vnToday().slice(0,7);
@@ -211,7 +283,7 @@ export async function handle(db, msg, updateId) {
     const income = rows.filter(r => r.kind === 'contribution').reduce((a,r) => a+r.amount_vnd,0);
     const expense = rows.filter(r => r.kind === 'expense').reduce((a,r) => a+r.amount_vnd,0);
     const rent = rows.filter(r => r.kind === 'expense' && r.category === 'Tiền phòng').reduce((a,r) => a+r.amount_vnd,0);
-    return { reply: `Tháng ${month}\nThu quỹ: ${money(income)}\nChi: ${money(expense)}\nTrong đó tiền phòng: ${money(rent)}\nMỗi người chịu: ${money(Math.floor(expense/2))}${expense % 2 ? ' (lẻ 1đ, cần đối chiếu khi chia)' : ''}` };
+    return { reply: `Tháng ${month}\nThu quỹ: ${money(income)}\nChi: ${money(expense)}\nTrong đó tiền phòng: ${money(rent)}\nMỗi người chịu: ${money(Math.floor(expense/2))}${expense % 2 ? ' (lẻ 1đ, cần đối chiếu khi chia)' : ''}`, markup: back() };
   }
   if (cmd === '/xuat') return { reply: 'Đang gửi bản sao giao dịch CSV.', csv: true };
   if (cmd === '/nhom') return { reply: 'Nhóm này đã được chọn cho quỹ phòng.' };
@@ -227,16 +299,20 @@ export default {
     try { update = await request.json(); } catch { return new Response('Bad request', { status: 400 }); }
     if (!Number.isSafeInteger(update.update_id)) return new Response('Bad request', { status: 400 });
     if (await first(env.DB, 'SELECT 1 FROM processed_updates WHERE update_id=?', update.update_id)) return new Response('OK');
-    if (!update.message) { await mark(env.DB, update.update_id); return new Response('OK'); }
+    const callback = update.callback_query;
+    if (!update.message && !callback) { await mark(env.DB, update.update_id); return new Response('OK'); }
+    if (callback && !callback.message?.chat) { await mark(env.DB, update.update_id); await telegram(env, 'answerCallbackQuery', { callback_query_id: callback.id, text: 'Nút này không còn dùng được.' }); return new Response('OK'); }
+    const msg = callback ? { chat: callback.message.chat, from: callback.from, text: callbackCommand(callback.data) } : update.message;
     let result;
-    try { result = await handle(env.DB, update.message, update.update_id); }
+    try { result = await handle(env.DB, msg, update.update_id); }
     catch (err) {
       if (!(err instanceof Error) || !/^(Cách dùng|Không tìm thấy|Đã|Giao dịch|Số tiền|Ngày cần|Tháng cần|Người|Chỉ|Nội dung|Loại chi|Khoản|Mã mời|Bot chỉ|Hai thành viên|Có thể sửa|Hãy)/.test(err.message)) { console.error(err); return new Response('Internal error', { status: 500 }); }
       result = { reply: err.message };
     }
     if (!result.committed) await mark(env.DB, update.update_id);
-    if (result.reply) await send(env, update.message.chat.id, result.reply);
-    if (result.csv) await sendCsv(env, env.DB, update.message.chat.id);
+    if (callback) await telegram(env, 'answerCallbackQuery', { callback_query_id: callback.id });
+    if (result.reply) await send(env, msg.chat.id, result.reply, result.markup);
+    if (result.csv) await sendCsv(env, env.DB, msg.chat.id);
     return new Response('OK');
   }
 };
