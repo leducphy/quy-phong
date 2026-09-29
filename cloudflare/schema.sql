@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS users (
   telegram_id INTEGER PRIMARY KEY,
   member TEXT NOT NULL UNIQUE CHECK(member IN ('Phi','An')),
+  last_ui_message_id INTEGER,
   joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS transactions (
@@ -61,3 +62,11 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
   sent_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS approval_messages (
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  request_type TEXT NOT NULL CHECK(request_type IN ('transaction','change')),
+  reference_id INTEGER NOT NULL,
+  PRIMARY KEY(chat_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS approval_messages_request ON approval_messages(request_type,reference_id);

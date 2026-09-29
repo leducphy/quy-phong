@@ -6,6 +6,7 @@ Bot Telegram quản lý quỹ phòng của Phi và An, chạy trên Cloudflare W
 
 - `cloudflare/worker.js`: giao diện nút bấm và webhook.
 - `cloudflare/schema.sql`: cấu trúc D1 hiện tại, gồm các bảng giao dịch, duyệt thay đổi và thông báo.
+- `cloudflare/migrations/0002_last_ui_message.sql`: nâng cấp D1 đang chạy để theo dõi màn hình và tin chờ duyệt.
 - `cloudflare/wrangler.toml`: tên Worker và liên kết D1 của bản đang chạy.
 - `cloudflare/worker.test.js`: kiểm tra quyền, trạng thái quỹ và thông báo.
 
@@ -18,6 +19,8 @@ D1 được tạo lại từ 86 giao dịch trong file `Quỹ Phòng.xlsx`: 14 k
 ## Dùng nút bấm
 
 Mỗi người mở chat riêng với bot và bấm **Start** một lần. Sau đó bấm **☰ Menu** để ghi góp quỹ, chi từ quỹ, ứng tiền cá nhân, xem số dư hoặc các việc đang chờ. Khi bot hỏi số tiền và nội dung, trả lời trực tiếp tin nhắn đó. Bot không dùng lệnh gõ tay cho thao tác thường ngày và không xử lý giao dịch trong nhóm.
+
+Khi bấm **☰ Menu** hoặc **‹ Menu**, bot dọn màn hình trước và tin bấm Menu nếu Telegram còn cho phép xóa (trong 48 giờ). Tin có nút **Duyệt/Từ chối** được giữ lại khi còn chờ; sau khi xử lý, bot xóa các tin chờ duyệt đã theo dõi hoặc gỡ nút nếu tin quá cũ để xóa. Tin nhắn từ trước bản cập nhật này không thể được dọn hàng loạt vì Telegram không cho bot liệt kê lịch sử chat.
 
 Người còn lại duyệt hoặc từ chối mọi giao dịch mới. Trước khi duyệt, số dư quỹ chưa thay đổi. Sau khi duyệt khoản ứng, quỹ trừ tiền và hiện khoản cần hoàn. An có thể bấm **Hoàn khoản này** hoặc **Hoàn toàn bộ** rồi xác nhận tổng tiền; khoản ứng được ghi nhận hoàn ngay, Phi không cần bấm xác nhận. Bước hoàn tiền không trừ quỹ lần thứ hai. Giao dịch đã duyệt nếu cần sửa hoặc hủy cũng phải được người còn lại chấp thuận.
 

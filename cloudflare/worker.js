@@ -22,6 +22,18 @@ const button = (label, data) => ({ text: label, callback_data: data });
 const keyboard = rows => ({ inline_keyboard: rows });
 const back = () => keyboard([[button('‹ Menu', 'm')]]);
 const other = member => member === 'Phi' ? 'An' : 'Phi';
+function needsApproval(markup) {
+  return Boolean(markup?.inline_keyboard?.some(row => row.some(item => /^(?:approve|reject|change:approve|change:reject):/.test(item.callback_data || ''))));
+}
+function approvalReference(markup) {
+  for (const row of markup?.inline_keyboard || []) {
+    for (const item of row) {
+      const match = /^(approve|change:approve):([1-9]\d*)$/.exec(item.callback_data || '');
+      if (match) return { type: match[1] === 'approve' ? 'transaction' : 'change', id: Number(match[2]) };
+    }
+  }
+  return null;
+}
 function menu() {
   return keyboard([
     [button('➕ Góp quỹ', 'new:contribution'), button('➖ Chi từ quỹ', 'new:expense')],
@@ -112,6 +124,21 @@ async function telegram(env, method, body) {
 }
 async function send(env, chatId, message, markup) {
   return telegram(env, 'sendMessage', { chat_id: chatId, text: message.slice(0, 4000), ...(markup ? { reply_markup: markup } : {}) });
+}
+async function deleteMessage(env, chatId, messageId) {
+  if (!Number.isSafeInteger(messageId) || messageId <= 0) return false;
+  try { await telegram(env, 'deleteMessage', { chat_id: chatId, message_id: messageId }); return true; }
+  catch (error) { console.warn('Could not delete old bot message:', error.message); return false; }
+}
+async function removeApprovalButtons(env, chatId, messageId) {
+  try { await telegram(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); }
+  catch (error) { console.warn('Could not clear old approval buttons:', error.message); }
+}
+async function rememberApproval(db, chatId, messageId, markup) {
+  const reference = approvalReference(markup);
+  if (reference && Number.isSafeInteger(messageId) && messageId > 0) {
+    await sql(db, 'INSERT OR IGNORE INTO approval_messages(chat_id,message_id,request_type,reference_id) VALUES(?,?,?,?)', chatId, messageId, reference.type, reference.id).run();
+  }
 }
 function csvCell(value) {
   const text = String(value ?? '');
@@ -212,7 +239,10 @@ async function flushOutbox(env) {
     const recipient = await first(env.DB, 'SELECT telegram_id FROM users WHERE member=?', item.recipient_member);
     if (!recipient) continue;
     const notice = await makeNotification(env.DB, item);
-    if (notice) await send(env, recipient.telegram_id, notice.text, notice.markup);
+    if (notice) {
+      const sent = await send(env, recipient.telegram_id, notice.text, notice.markup);
+      await rememberApproval(env.DB, recipient.telegram_id, sent?.message_id, notice.markup);
+    }
     await sql(env.DB, 'UPDATE notification_outbox SET sent_at=CURRENT_TIMESTAMP WHERE id=? AND sent_at IS NULL', item.id).run();
   }
 }
@@ -332,7 +362,7 @@ async function handle(db, env, event, updateId) {
     ];
     if (creator) statements.push(queue(db, creator.member, approved ? 'approved_tx' : 'rejected_tx', row.id));
     await commit(db, updateId, statements);
-    return { reply: approved ? 'Đã duyệt. Quỹ đã được cập nhật.\n' + rowText(after) : 'Đã từ chối giao dịch #' + row.id + '.', markup: back(), committed: true };
+    return { reply: approved ? 'Đã duyệt. Quỹ đã được cập nhật.\n' + rowText(after) : 'Đã từ chối giao dịch #' + row.id + '.', markup: back(), committed: true, resolvedApproval: { type: 'transaction', id: row.id } };
   }
   match = /^edit:([1-9]\d*)$/.exec(action || '');
   if (match) {
@@ -358,7 +388,7 @@ async function handle(db, env, event, updateId) {
     const row = await transaction(db, positiveId(match[1]));
     if (row.status === 'pending') {
       await commit(db, updateId, [sql(db, 'UPDATE transactions SET deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?', row.id), audit(db, row.id, 'delete', userId, row, { ...row, deleted_at: new Date().toISOString() })]);
-      return { reply: 'Đã hủy giao dịch #' + row.id + '.', markup: back(), committed: true };
+      return { reply: 'Đã hủy giao dịch #' + row.id + '.', markup: back(), committed: true, resolvedApproval: { type: 'transaction', id: row.id } };
     }
     if (await first(db, "SELECT id FROM change_requests WHERE transaction_id=? AND status='pending'", row.id)) throw new UserError('Giao dịch đã có yêu cầu sửa hoặc hủy đang chờ duyệt.');
     await commit(db, updateId, [
@@ -397,7 +427,7 @@ async function handle(db, env, event, updateId) {
     const requester = await first(db, 'SELECT member FROM users WHERE telegram_id=?', change.requested_by);
     if (requester) statements.push(queue(db, requester.member, approved ? 'approved_change' : 'rejected_change', change.id));
     await commit(db, updateId, statements);
-    return { reply: approved ? 'Đã duyệt thay đổi cho giao dịch #' + row.id + '.' : 'Đã từ chối yêu cầu sửa/hủy #' + row.id + '.', markup: back(), committed: true };
+    return { reply: approved ? 'Đã duyệt thay đổi cho giao dịch #' + row.id + '.' : 'Đã từ chối yêu cầu sửa/hủy #' + row.id + '.', markup: back(), committed: true, resolvedApproval: { type: 'change', id: change.id } };
   }
   if (action === 'reimburse:all') {
     if (member !== HOLDER) throw new UserError('Chỉ An, người giữ quỹ, có thể đánh dấu hoàn ứng.');
@@ -459,7 +489,41 @@ export default {
       }
       if (!result.committed) await mark(env.DB, update.update_id);
       if (callback) await telegram(env, 'answerCallbackQuery', { callback_query_id: callback.id });
-      if (result.reply) await send(env, event.chat.id, result.reply, result.markup);
+      if (result.reply) {
+        const menuRequested = event.action === 'm' || event.text === '☰ Menu';
+        const oldMessage = menuRequested ? await first(env.DB, 'SELECT last_ui_message_id FROM users WHERE telegram_id=?', event.from.id) : null;
+        const approvalMessages = result.resolvedApproval
+          ? await all(env.DB, 'SELECT chat_id,message_id FROM approval_messages WHERE request_type=? AND reference_id=?', result.resolvedApproval.type, result.resolvedApproval.id)
+          : [];
+        const sourceCanBeRemoved = callback && (!needsApproval(callback.message.reply_markup) || Boolean(result.resolvedApproval));
+        const toDelete = new Map();
+        const approvalKeys = new Set();
+        const addDelete = (chatId, messageId) => {
+          if (Number.isSafeInteger(messageId) && messageId > 0) toDelete.set(chatId + ':' + messageId, { chatId, messageId });
+        };
+        if (sourceCanBeRemoved) {
+          addDelete(event.chat.id, callback.message.message_id);
+          if (result.resolvedApproval && needsApproval(callback.message.reply_markup)) approvalKeys.add(event.chat.id + ':' + callback.message.message_id);
+        }
+        if (menuRequested) addDelete(event.chat.id, oldMessage?.last_ui_message_id);
+        if (event.text === '☰ Menu') addDelete(event.chat.id, event.message_id);
+        for (const message of approvalMessages) {
+          addDelete(message.chat_id, message.message_id);
+          approvalKeys.add(message.chat_id + ':' + message.message_id);
+        }
+        for (const [key, { chatId, messageId }] of toDelete) {
+          const removed = await deleteMessage(env, chatId, messageId);
+          if (!removed && approvalKeys.has(key)) await removeApprovalButtons(env, chatId, messageId);
+        }
+        if (result.resolvedApproval) {
+          await sql(env.DB, 'DELETE FROM approval_messages WHERE request_type=? AND reference_id=?', result.resolvedApproval.type, result.resolvedApproval.id).run();
+        }
+        const sent = await send(env, event.chat.id, result.reply, result.markup);
+        await rememberApproval(env.DB, event.chat.id, sent?.message_id, result.markup);
+        if (!needsApproval(result.markup) && Number.isSafeInteger(sent?.message_id) && sent.message_id > 0) {
+          await sql(env.DB, 'UPDATE users SET last_ui_message_id=? WHERE telegram_id=?', sent.message_id, event.from.id).run();
+        }
+      }
       if (result.csv) await sendCsv(env, env.DB, event.chat.id);
       await flushOutbox(env);
       return new Response('OK');

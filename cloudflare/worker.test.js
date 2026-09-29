@@ -222,3 +222,96 @@ test('webhook handles button approval and acknowledges Telegram callback', async
     assert.ok(calls.some(call => call.method === 'sendMessage' && call.body.chat_id === phi.id && /đã được duyệt/.test(call.body.text)));
   } finally { globalThis.fetch = original; }
 });
+
+test('returning to menu removes the previous screen and the Menu tap', async () => {
+  const { db, sqlite } = database();
+  await startBoth(db);
+  sqlite.exec("UPDATE users SET last_ui_message_id=50 WHERE member='Phi'");
+  const calls = [];
+  let nextMessageId = 200;
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const method = String(url).split('/').pop();
+    const body = JSON.parse(options.body);
+    calls.push({ method, body });
+    return Response.json({ ok: true, result: method === 'sendMessage' ? { message_id: nextMessageId++ } : true });
+  };
+  try {
+    const callback = new Request('https://example.workers.dev/telegram', {
+      method: 'POST', headers: { 'X-Telegram-Bot-Api-Secret-Token': 'secret' },
+      body: JSON.stringify({ update_id: 3, callback_query: { id: 'menu-1', data: 'm', from: phi, message: { message_id: 50, chat: { id: phi.id, type: 'private' } } } })
+    });
+    assert.equal((await worker.fetch(callback, { ...env, DB: db })).status, 200);
+    assert.deepEqual(calls.filter(call => call.method === 'deleteMessage').map(call => call.body.message_id), [50]);
+    assert.equal(sqlite.prepare("SELECT last_ui_message_id FROM users WHERE member='Phi'").get().last_ui_message_id, 200);
+
+    const keyboardTap = new Request('https://example.workers.dev/telegram', {
+      method: 'POST', headers: { 'X-Telegram-Bot-Api-Secret-Token': 'secret' },
+      body: JSON.stringify({ update_id: 4, message: { message_id: 51, from: phi, chat: { id: phi.id, type: 'private' }, text: '☰ Menu' } })
+    });
+    assert.equal((await worker.fetch(keyboardTap, { ...env, DB: db })).status, 200);
+    assert.deepEqual(calls.filter(call => call.method === 'deleteMessage').map(call => call.body.message_id), [50, 200, 51]);
+    assert.equal(sqlite.prepare("SELECT last_ui_message_id FROM users WHERE member='Phi'").get().last_ui_message_id, 201);
+  } finally { globalThis.fetch = original; }
+});
+
+test('pending approval messages survive Menu and are removed after approval', async () => {
+  const { db, sqlite } = database();
+  await startBoth(db);
+  sqlite.exec("INSERT INTO transactions(occurred_on,kind,amount_vnd,description,member,status,created_by) VALUES ('2026-09-29','contribution',100000,'Góp quỹ','Phi','pending',101)");
+  const approvalMarkup = { inline_keyboard: [[{ text: 'Duyệt', callback_data: 'approve:1' }, { text: 'Từ chối', callback_data: 'reject:1' }], [{ text: 'Chi tiết', callback_data: 'tx:1' }]] };
+  const calls = [];
+  let nextMessageId = 300;
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const method = String(url).split('/').pop();
+    const body = JSON.parse(options.body);
+    calls.push({ method, body });
+    return Response.json({ ok: true, result: method === 'sendMessage' ? { message_id: nextMessageId++ } : true });
+  };
+  const press = (updateId, action, messageId, replyMarkup, from = an) => new Request('https://example.workers.dev/telegram', {
+    method: 'POST', headers: { 'X-Telegram-Bot-Api-Secret-Token': 'secret' },
+    body: JSON.stringify({ update_id: updateId, callback_query: { id: 'tap-' + updateId, data: action, from, message: { message_id: messageId, chat: { id: from.id, type: 'private' }, reply_markup: replyMarkup } } })
+  });
+  try {
+    assert.equal((await worker.fetch(press(3, 'tx:1', 80, approvalMarkup), { ...env, DB: db })).status, 200);
+    assert.equal(calls.some(call => call.method === 'deleteMessage' && call.body.message_id === 80), false);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) count FROM approval_messages WHERE reference_id=1').get().count, 1);
+    const detailMarkup = calls.find(call => call.method === 'sendMessage').body.reply_markup;
+    assert.equal((await worker.fetch(press(4, 'm', 300, detailMarkup), { ...env, DB: db })).status, 200);
+    assert.equal(calls.some(call => call.method === 'deleteMessage' && call.body.message_id === 300), false);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) count FROM approval_messages WHERE reference_id=1').get().count, 1);
+    assert.equal((await worker.fetch(press(5, 'approve:1', 81, approvalMarkup, phi), { ...env, DB: db })).status, 200);
+    assert.equal(calls.filter(call => call.method === 'deleteMessage').length, 0);
+    assert.equal((await worker.fetch(press(6, 'approve:1', 80, approvalMarkup), { ...env, DB: db })).status, 200);
+    assert.deepEqual(calls.filter(call => call.method === 'deleteMessage').map(call => call.body.message_id).sort((a, b) => a - b), [80, 300]);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) count FROM approval_messages WHERE reference_id=1').get().count, 0);
+    assert.equal(sqlite.prepare('SELECT status FROM transactions WHERE id=1').get().status, 'confirmed');
+  } finally { globalThis.fetch = original; }
+});
+
+test('old approval message loses its buttons when Telegram refuses deletion', async () => {
+  const { db, sqlite } = database();
+  await startBoth(db);
+  sqlite.exec("INSERT INTO transactions(occurred_on,kind,amount_vnd,description,member,status,created_by) VALUES ('2026-09-29','contribution',100000,'Góp quỹ','Phi','pending',101)");
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const method = String(url).split('/').pop();
+    const body = JSON.parse(options.body);
+    calls.push({ method, body });
+    if (method === 'deleteMessage') return Response.json({ ok: false, description: 'message is too old' });
+    return Response.json({ ok: true, result: method === 'sendMessage' ? { message_id: 400 } : true });
+  };
+  const oldWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const request = new Request('https://example.workers.dev/telegram', {
+      method: 'POST', headers: { 'X-Telegram-Bot-Api-Secret-Token': 'secret' },
+      body: JSON.stringify({ update_id: 3, callback_query: { id: 'old-approval', data: 'approve:1', from: an, message: { message_id: 80, chat: { id: an.id, type: 'private' }, reply_markup: { inline_keyboard: [[{ text: 'Duyệt', callback_data: 'approve:1' }]] } } } })
+    });
+    assert.equal((await worker.fetch(request, { ...env, DB: db })).status, 200);
+    assert.ok(calls.some(call => call.method === 'editMessageReplyMarkup' && call.body.message_id === 80 && call.body.reply_markup.inline_keyboard.length === 0));
+    assert.equal(sqlite.prepare('SELECT status FROM transactions WHERE id=1').get().status, 'confirmed');
+  } finally { globalThis.fetch = original; console.warn = oldWarn; }
+});
