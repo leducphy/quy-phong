@@ -15,8 +15,13 @@ if [ "${1:-}" = "--login" ] && [ "$#" -eq 1 ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--users" ] && [ "$#" -eq 1 ]; then
+  node sync_users.mjs
+  exit 0
+fi
+
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--check" ]; }; then
-  echo "Cách dùng: ./update_bot.sh [--login|--check]" >&2
+  echo "Cách dùng: ./update_bot.sh [--login|--users|--check]" >&2
   exit 2
 fi
 
