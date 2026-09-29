@@ -1,0 +1,23 @@
+# Credentials and local configuration
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+.local/
+.config/
+.wrangler/
+
+# Dependencies and generated files
+node_modules/
+__pycache__/
+.DS_Store
+
+# Personal transaction data and database copies
+du_lieu_cu.json
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.csv
+*import*.sql

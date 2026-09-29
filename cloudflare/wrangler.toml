@@ -1,0 +1,8 @@
+name = "quy-phong-301-bot"
+main = "worker.js"
+compatibility_date = "2026-09-29"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "quy-phong-301"
+database_id = "262290f5-3f88-4762-ba48-642009ce02d8"
